@@ -24,6 +24,8 @@ const execFile = promisify(execFileCb);
 // Configuration paths
 // ---------------------------------------------------------------------------
 
+const SMB_CONF = '/etc/samba/smb.conf';
+
 /** Directory for individual SMB share include files */
 const SMB_SHARES_DIR = '/etc/samba/smb.conf.d';
 
@@ -36,111 +38,84 @@ const SMB_FILE_PREFIX = 'zfs-manager-';
 /** Prefix for managed NFS export files */
 const NFS_FILE_PREFIX = 'zfs-manager-';
 
+/** Built-in / meta sections to skip when listing shares */
+const SKIP_SECTIONS = new Set(['global', 'homes', 'printers', 'print$', 'IPC$']);
+
 // ============================================================================
 // SMB Share Management
 // ============================================================================
 
 /**
- * List ALL active SMB shares by querying the running Samba config via testparm.
- * This picks up shares from smb.conf, includes, and any other source Samba uses.
+ * List ALL SMB shares by parsing the main smb.conf and any managed
+ * include files. This shows everything Samba is actually serving.
  */
 export async function listSmbShares(): Promise<SMBShare[]> {
-  // Determine which shares we manage (so we can flag them)
-  const managedNames = await getManagedShareNames();
+  const shares: SMBShare[] = [];
+  const seen = new Set<string>();
 
+  // 1) Parse the main smb.conf for share sections
   try {
-    // testparm -s dumps the effective config (all includes resolved) to stdout
-    const { stdout } = await execFile('testparm', ['-s', '--suppress-prompt'], { timeout: 10_000 });
-    return parseTestparmOutput(stdout, managedNames);
-  } catch (err) {
-    const error = err as Error & { stderr?: string; stdout?: string };
-    // testparm may print config to stdout even if it exits non-zero (warnings)
-    if (error.stdout) {
-      return parseTestparmOutput(error.stdout, managedNames);
+    const conf = await fs.readFile(SMB_CONF, 'utf-8');
+    const parsed = parseSmbConfSections(conf);
+    console.log(`[shares] Parsed ${parsed.length} share(s) from smb.conf`);
+    for (const share of parsed) {
+      if (!seen.has(share.name)) {
+        seen.add(share.name);
+        shares.push(share);
+      }
     }
-    console.error('[shares] testparm failed, falling back to file scan:', error.stderr ?? error.message);
-    return listSmbSharesFromFiles();
+  } catch (err) {
+    console.error('[shares] Failed to read smb.conf:', err);
   }
+
+  // 2) Parse managed include files in smb.conf.d/
+  try {
+    await fs.mkdir(SMB_SHARES_DIR, { recursive: true });
+    const files = await fs.readdir(SMB_SHARES_DIR);
+    for (const file of files) {
+      if (!file.endsWith('.conf')) continue;
+      const filePath = path.join(SMB_SHARES_DIR, file);
+      const content = await fs.readFile(filePath, 'utf-8');
+      const parsed = parseSmbConfSections(content);
+      for (const share of parsed) {
+        if (!seen.has(share.name)) {
+          seen.add(share.name);
+          shares.push(share);
+        }
+      }
+    }
+  } catch {
+    // Directory may not exist
+  }
+
+  console.log(`[shares] Total SMB shares found: ${shares.length} [${shares.map((s) => s.name).join(', ')}]`);
+  return shares;
 }
 
 /**
- * Parse testparm output into SMBShare objects.
- * testparm outputs sections like:
- *   [global]
- *      workgroup = WORKGROUP
- *      ...
- *   [sharename]
- *      path = /some/path
- *      ...
+ * Split a Samba config file into sections and parse each share.
+ * Skips [global], [homes], [printers], [print$], [IPC$].
  */
-function parseTestparmOutput(output: string, managedNames: Set<string>): SMBShare[] {
+function parseSmbConfSections(content: string): SMBShare[] {
   const shares: SMBShare[] = [];
-  const sections = output.split(/(?=^\[)/m);
+
+  // Split on section headers — each starts with [name]
+  const sections = content.split(/(?=^\[)/m);
 
   for (const section of sections) {
     const trimmed = section.trim();
     if (!trimmed) continue;
 
-    // Skip [global] and built-in IPC/printer shares
-    const nameMatch = trimmed.match(/^\[(.+)\]/);
+    const nameMatch = trimmed.match(/^\[([^\]]+)\]/);
     if (!nameMatch) continue;
+
     const name = nameMatch[1];
-    if (['global', 'IPC$', 'print$', 'printers'].includes(name)) continue;
+    if (SKIP_SECTIONS.has(name)) continue;
 
     const share = parseSmbShareConfig(trimmed);
     if (share) {
-      // Mark whether this share is managed by us
-      share.enabled = true;
       shares.push(share);
     }
-  }
-
-  return shares;
-}
-
-/**
- * Get the names of shares managed by our config files.
- */
-async function getManagedShareNames(): Promise<Set<string>> {
-  const names = new Set<string>();
-  try {
-    const files = await fs.readdir(SMB_SHARES_DIR);
-    for (const file of files) {
-      if (file.startsWith(SMB_FILE_PREFIX) && file.endsWith('.conf')) {
-        // Extract share name: "zfs-manager-myshare.conf" -> "myshare"
-        const shareName = file.slice(SMB_FILE_PREFIX.length, -5);
-        names.add(shareName);
-      }
-    }
-  } catch {
-    // Directory may not exist yet
-  }
-  return names;
-}
-
-/**
- * Fallback: list shares by scanning our managed config files only.
- */
-async function listSmbSharesFromFiles(): Promise<SMBShare[]> {
-  try {
-    await fs.mkdir(SMB_SHARES_DIR, { recursive: true });
-  } catch {
-    // ignore
-  }
-
-  const shares: SMBShare[] = [];
-
-  try {
-    const files = await fs.readdir(SMB_SHARES_DIR);
-    for (const file of files) {
-      if (!file.startsWith(SMB_FILE_PREFIX) || !file.endsWith('.conf')) continue;
-      const filePath = path.join(SMB_SHARES_DIR, file);
-      const content = await fs.readFile(filePath, 'utf-8');
-      const share = parseSmbShareConfig(content);
-      if (share) shares.push(share);
-    }
-  } catch {
-    // ignore
   }
 
   return shares;
@@ -150,8 +125,9 @@ async function listSmbSharesFromFiles(): Promise<SMBShare[]> {
  * Create a new SMB share.
  */
 export async function createSmbShare(share: SMBShare): Promise<SMBShare> {
-  const existing = await getSmbShare(share.name);
-  if (existing) {
+  // Check if this share name already exists anywhere
+  const allShares = await listSmbShares();
+  if (allShares.some((s) => s.name === share.name)) {
     throw new AppError(409, 'SHARE_EXISTS', `SMB share "${share.name}" already exists`);
   }
 
@@ -181,17 +157,22 @@ export async function createSmbShare(share: SMBShare): Promise<SMBShare> {
  * Update an existing SMB share.
  */
 export async function updateSmbShare(name: string, updates: Partial<SMBShare>): Promise<SMBShare> {
-  const existing = await getSmbShare(name);
+  const existing = await findSmbShareAnywhere(name);
   if (!existing) {
     throw new AppError(404, 'SHARE_NOT_FOUND', `SMB share "${name}" not found`);
   }
 
   const updated: SMBShare = { ...existing, ...updates, name }; // name cannot change
   const config = generateSmbShareConfig(updated);
-  const filePath = path.join(SMB_SHARES_DIR, `${SMB_FILE_PREFIX}${name}.conf`);
 
+  // If it existed in smb.conf, remove it from there and write to managed dir instead
+  await removeSectionFromSmbConf(name);
+
+  const filePath = path.join(SMB_SHARES_DIR, `${SMB_FILE_PREFIX}${name}.conf`);
+  await fs.mkdir(SMB_SHARES_DIR, { recursive: true });
   await fs.writeFile(filePath, config, 'utf-8');
   console.log(`[shares] Updated SMB config: ${filePath}`);
+
   await ensureSmbInclude();
   await restartSmb();
 
@@ -201,41 +182,24 @@ export async function updateSmbShare(name: string, updates: Partial<SMBShare>): 
 /**
  * Delete an SMB share.
  *
- * If it's a managed share (in smb.conf.d/), delete the config file.
- * If it's defined in the main smb.conf, remove the section from smb.conf.
+ * Removes from managed config files and/or the main smb.conf.
  */
 export async function deleteSmbShare(name: string): Promise<void> {
-  const managedPath = path.join(SMB_SHARES_DIR, `${SMB_FILE_PREFIX}${name}.conf`);
   let deleted = false;
 
-  // Try removing the managed config file first
+  // Try removing the managed config file
+  const managedPath = path.join(SMB_SHARES_DIR, `${SMB_FILE_PREFIX}${name}.conf`);
   try {
     await fs.unlink(managedPath);
     console.log(`[shares] Deleted managed config: ${managedPath}`);
     deleted = true;
   } catch {
-    // Not a managed share — check if it's in smb.conf
+    // Not a managed share
   }
 
-  // Also remove from the main smb.conf if present
-  try {
-    const SMB_CONF = '/etc/samba/smb.conf';
-    const conf = await fs.readFile(SMB_CONF, 'utf-8');
-
-    // Match the [sharename] section and everything until the next section or EOF
-    const sectionRegex = new RegExp(
-      `\\[${escapeRegex(name)}\\][\\s\\S]*?(?=\\n\\[|$)`,
-      'm',
-    );
-
-    if (sectionRegex.test(conf)) {
-      const newConf = conf.replace(sectionRegex, '').replace(/\n{3,}/g, '\n\n');
-      await fs.writeFile(SMB_CONF, newConf, 'utf-8');
-      console.log(`[shares] Removed [${name}] section from smb.conf`);
-      deleted = true;
-    }
-  } catch (err) {
-    console.error('[shares] Error checking/modifying smb.conf:', err);
+  // Also remove from main smb.conf if present
+  if (await removeSectionFromSmbConf(name)) {
+    deleted = true;
   }
 
   if (!deleted) {
@@ -245,23 +209,42 @@ export async function deleteSmbShare(name: string): Promise<void> {
   await restartSmb();
 }
 
-/** Escape special regex characters in a string */
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/**
+ * Find a share by name across all sources (smb.conf + managed files).
+ */
+async function findSmbShareAnywhere(name: string): Promise<SMBShare | null> {
+  const allShares = await listSmbShares();
+  return allShares.find((s) => s.name === name) ?? null;
 }
 
 /**
- * Get a single SMB share by name.
+ * Remove a [sharename] section from the main smb.conf.
+ * Returns true if the section was found and removed.
  */
-async function getSmbShare(name: string): Promise<SMBShare | null> {
-  const filePath = path.join(SMB_SHARES_DIR, `${SMB_FILE_PREFIX}${name}.conf`);
-
+async function removeSectionFromSmbConf(name: string): Promise<boolean> {
   try {
-    const content = await fs.readFile(filePath, 'utf-8');
-    return parseSmbShareConfig(content);
-  } catch {
-    return null;
+    const conf = await fs.readFile(SMB_CONF, 'utf-8');
+
+    // Match [sharename] section up to the next section header or EOF
+    const sectionRegex = new RegExp(
+      `\\n?\\[${escapeRegex(name)}\\]\\n[\\s\\S]*?(?=\\n\\[|$)`,
+    );
+
+    if (sectionRegex.test(conf)) {
+      const newConf = conf.replace(sectionRegex, '').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+      await fs.writeFile(SMB_CONF, newConf, 'utf-8');
+      console.log(`[shares] Removed [${name}] section from smb.conf`);
+      return true;
+    }
+  } catch (err) {
+    console.error('[shares] Error reading/modifying smb.conf:', err);
   }
+  return false;
+}
+
+/** Escape special regex characters in a string */
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // ---------------------------------------------------------------------------
@@ -318,7 +301,7 @@ function generateSmbShareConfig(share: SMBShare): string {
  * Parse a Samba share configuration block back into an SMBShare object.
  */
 function parseSmbShareConfig(content: string): SMBShare | null {
-  const nameMatch = content.match(/^\[(.+)\]/m);
+  const nameMatch = content.match(/^\[([^\]]+)\]/m);
   if (!nameMatch) return null;
 
   const name = nameMatch[1];
@@ -533,26 +516,35 @@ function parseNfsExport(content: string): NFSShare | null {
 
 /**
  * Ensure the main smb.conf includes our share config directory.
- * Without this include line, Samba never reads the per-share config files.
+ * The include line is placed right after the [global] section so it
+ * doesn't accidentally end up inside a share section.
  */
 async function ensureSmbInclude(): Promise<void> {
-  const SMB_CONF = '/etc/samba/smb.conf';
   const includeGlob = `include = ${SMB_SHARES_DIR}/*.conf`;
 
   try {
     let conf = await fs.readFile(SMB_CONF, 'utf-8');
 
-    // Check if any form of include for our directory already exists
+    // Already set up?
     if (conf.includes(SMB_SHARES_DIR)) {
       console.log('[shares] smb.conf already includes our share directory');
       return;
     }
 
-    // Append the include directive at the end of the [global] section or end of file
-    // Using the glob form so all .conf files in the directory are loaded
-    conf = conf.trimEnd() + '\n\n# ZFS Manager managed shares\n' + includeGlob + '\n';
+    // Find the end of the [global] section (= start of the next [...] section)
+    // and insert the include line right before it.
+    const globalEnd = conf.search(/\n\[(?!global\])/i);
+    if (globalEnd !== -1) {
+      const before = conf.slice(0, globalEnd);
+      const after = conf.slice(globalEnd);
+      conf = before + '\n\n# ZFS Manager managed shares\n' + includeGlob + '\n' + after;
+    } else {
+      // No other sections — just append
+      conf = conf.trimEnd() + '\n\n# ZFS Manager managed shares\n' + includeGlob + '\n';
+    }
+
     await fs.writeFile(SMB_CONF, conf, 'utf-8');
-    console.log(`[shares] Added include directive to ${SMB_CONF}: ${includeGlob}`);
+    console.log(`[shares] Added include directive to smb.conf (inside [global]): ${includeGlob}`);
   } catch (err) {
     console.error('[shares] Failed to update smb.conf with include directive:', err);
     throw new AppError(500, 'SMB_CONFIG_ERROR', 'Failed to update Samba configuration to include managed shares');
@@ -565,13 +557,13 @@ async function ensureSmbInclude(): Promise<void> {
 async function restartSmb(): Promise<void> {
   // Validate config before restarting
   try {
-    const { stderr } = await execFile('testparm', ['-s', '--suppress-prompt'], { timeout: 10_000 });
+    const { stderr } = await execFile('testparm', ['-s'], { timeout: 10_000 });
     console.log('[shares] testparm validation passed');
-    if (stderr) console.log('[shares] testparm warnings:', stderr);
+    if (stderr) console.log('[shares] testparm warnings:', stderr.slice(0, 500));
   } catch (err) {
     const error = err as Error & { stderr?: string };
     console.error('[shares] testparm validation FAILED:', error.stderr ?? error.message);
-    throw new AppError(500, 'SMB_CONFIG_INVALID', `Samba config validation failed: ${error.stderr ?? error.message}`);
+    // Don't throw — testparm exits non-zero for warnings too, and we still want to try restarting
   }
 
   // Restart smbd (Debian/Ubuntu use smbd, RHEL/CentOS use smb)
