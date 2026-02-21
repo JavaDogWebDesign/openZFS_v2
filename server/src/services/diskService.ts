@@ -39,26 +39,60 @@ interface LsblkDevice {
 }
 
 /**
+ * Get the set of device names actively used by imported ZFS pools.
+ * Parses `zpool status` to find device paths, then resolves to sdX names.
+ */
+async function getActiveZfsDevices(): Promise<Set<string>> {
+  const active = new Set<string>();
+
+  try {
+    const { stdout } = await execFile('/usr/sbin/zpool', ['status', '-LP']);
+    // Lines contain /dev/sdX or /dev/disk/by-id/... paths for active vdevs
+    for (const line of stdout.split('\n')) {
+      const trimmed = line.trim();
+      // Match lines that look like device entries in zpool status
+      const devMatch = trimmed.match(/^\/dev\/(\S+)/);
+      if (devMatch) {
+        // Extract the base device name (e.g. "sdb" from "/dev/sdb1" or "/dev/sdb")
+        const baseName = devMatch[1].replace(/[0-9]+$/, '');
+        active.add(baseName);
+      }
+      // Also match entries that are just device names (e.g. "sdb1  ONLINE  0  0  0")
+      const nameMatch = trimmed.match(/^(sd[a-z]+\d*|nvme\d+n\d+p?\d*)\s+\w+/);
+      if (nameMatch) {
+        const baseName = nameMatch[1].replace(/[0-9]+$/, '').replace(/p$/, '');
+        active.add(baseName);
+      }
+    }
+  } catch {
+    // No pools imported, or zpool not available — nothing is in use
+  }
+
+  return active;
+}
+
+/**
  * List all block devices on the system.
  * Filters to whole disks (type === 'disk') by default.
  */
 export async function listDisks(): Promise<Disk[]> {
-  const { stdout } = await execFile('lsblk', [
-    '--json',
-    '--bytes',
-    '--output', 'NAME,PATH,SIZE,TYPE,MODEL,SERIAL,VENDOR,TRAN,ROTA,WWN,FSTYPE,MOUNTPOINT,LABEL,UUID',
-    '--nodeps',  // top-level devices only (no partitions at top level)
+  const [lsblkResult, fullLsblkResult, activeDevices] = await Promise.all([
+    execFile('lsblk', [
+      '--json',
+      '--bytes',
+      '--output', 'NAME,PATH,SIZE,TYPE,MODEL,SERIAL,VENDOR,TRAN,ROTA,WWN,FSTYPE,MOUNTPOINT,LABEL,UUID',
+      '--nodeps',
+    ]),
+    execFile('lsblk', [
+      '--json',
+      '--bytes',
+      '--output', 'NAME,PATH,SIZE,TYPE,MODEL,SERIAL,VENDOR,TRAN,ROTA,WWN,FSTYPE,MOUNTPOINT,LABEL,UUID',
+    ]),
+    getActiveZfsDevices(),
   ]);
 
-  const parsed: LsblkOutput = JSON.parse(stdout);
-
-  // Also get partition info with a second call (includes children)
-  const { stdout: fullStdout } = await execFile('lsblk', [
-    '--json',
-    '--bytes',
-    '--output', 'NAME,PATH,SIZE,TYPE,MODEL,SERIAL,VENDOR,TRAN,ROTA,WWN,FSTYPE,MOUNTPOINT,LABEL,UUID',
-  ]);
-  const fullParsed: LsblkOutput = JSON.parse(fullStdout);
+  const parsed: LsblkOutput = JSON.parse(lsblkResult.stdout);
+  const fullParsed: LsblkOutput = JSON.parse(fullLsblkResult.stdout);
 
   // Build a map of device name -> children from the full output
   const childrenMap = new Map<string, LsblkDevice[]>();
@@ -91,9 +125,14 @@ export async function listDisks(): Promise<Disk[]> {
       diskType = 'ssd';
     }
 
-    // Determine if disk is in use by ZFS (basic heuristic: has zfs_member fstype)
-    const inUse = partitions.some((p) => p.fstype === 'zfs_member') ||
-      dev.fstype === 'zfs_member';
+    // A disk is "in use" only if it belongs to an actively imported pool,
+    // or has a non-ZFS filesystem mounted (e.g. ext4 root disk).
+    const isActiveZfs = activeDevices.has(dev.name);
+    const hasMountedPartition = partitions.some((p) => p.mountpoint);
+    const inUse = isActiveZfs || hasMountedPartition;
+
+    // Determine which pool owns this disk (if any)
+    const poolLabel = partitions.find((p) => p.fstype === 'zfs_member')?.label;
 
     disks.push({
       name: dev.name,
@@ -108,6 +147,7 @@ export async function listDisks(): Promise<Disk[]> {
       wwn: dev.wwn ?? undefined,
       partitions,
       inUse,
+      pool: isActiveZfs ? poolLabel : undefined,
     });
   }
 
