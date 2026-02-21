@@ -25,6 +25,8 @@ function buildHeaders(hasBody: boolean): HeadersInit {
   const csrf = getCsrfToken();
   if (csrf) {
     headers['X-CSRF-Token'] = csrf;
+  } else if (hasBody) {
+    console.warn('[api] No CSRF token found in cookies - mutating request may be rejected');
   }
 
   return headers;
@@ -40,6 +42,9 @@ async function request<T>(
 ): Promise<ApiResult<T>> {
   const url = `${API_BASE}${path}`;
   const hasBody = body !== undefined;
+  const start = performance.now();
+
+  console.log(`[api] ${method} ${path}`, hasBody ? body : '');
 
   try {
     const response = await fetch(url, {
@@ -49,8 +54,11 @@ async function request<T>(
       body: hasBody ? JSON.stringify(body) : undefined,
     });
 
+    const duration = Math.round(performance.now() - start);
+
     // Handle 401 by redirecting to login
     if (response.status === 401) {
+      console.warn(`[api] ${method} ${path} -> 401 UNAUTHORIZED (${duration}ms) - redirecting to /login`);
       const currentPath = window.location.pathname;
       if (currentPath !== '/login') {
         window.location.href = '/login';
@@ -65,8 +73,18 @@ async function request<T>(
     }
 
     const data = await response.json();
-    return data as ApiResult<T>;
+    const result = data as ApiResult<T>;
+
+    if (result.success) {
+      console.log(`[api] ${method} ${path} -> ${response.status} OK (${duration}ms)`);
+    } else {
+      console.error(`[api] ${method} ${path} -> ${response.status} FAILED (${duration}ms)`, result.error);
+    }
+
+    return result;
   } catch (err) {
+    const duration = Math.round(performance.now() - start);
+    console.error(`[api] ${method} ${path} -> NETWORK ERROR (${duration}ms)`, err);
     return {
       success: false,
       error: {

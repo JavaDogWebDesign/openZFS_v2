@@ -55,6 +55,7 @@ export function csrfProtection(req: Request, res: Response, next: NextFunction):
   const headerToken: string | undefined = req.headers[CSRF_HEADER] as string | undefined;
 
   if (!cookieToken || !headerToken) {
+    console.log(`[csrf] BLOCKED ${req.method} ${req.originalUrl} - missing token (cookie=${!!cookieToken}, header=${!!headerToken})`);
     res.status(403).json({
       success: false,
       error: { code: 'CSRF_MISSING', message: 'CSRF token missing' },
@@ -67,6 +68,7 @@ export function csrfProtection(req: Request, res: Response, next: NextFunction):
   const headerBuf = Buffer.from(headerToken);
 
   if (cookieBuf.length !== headerBuf.length || !crypto.timingSafeEqual(cookieBuf, headerBuf)) {
+    console.log(`[csrf] BLOCKED ${req.method} ${req.originalUrl} - token mismatch`);
     res.status(403).json({
       success: false,
       error: { code: 'CSRF_INVALID', message: 'CSRF token mismatch' },

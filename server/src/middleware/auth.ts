@@ -132,6 +132,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   const token: string | undefined = req.cookies?.[SESSION_COOKIE];
 
   if (!token) {
+    console.log(`[auth] REJECTED ${req.method} ${req.originalUrl} - no session cookie`);
     res.status(401).json({
       success: false,
       error: { code: 'UNAUTHORIZED', message: 'Authentication required' },
@@ -142,7 +143,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   const session = lookupSession(token);
 
   if (!session) {
-    // Clear the stale cookie
+    console.log(`[auth] REJECTED ${req.method} ${req.originalUrl} - session expired/invalid`);
     res.clearCookie(SESSION_COOKIE);
     res.status(401).json({
       success: false,
@@ -151,6 +152,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
     return;
   }
 
+  console.log(`[auth] OK ${req.method} ${req.originalUrl} - user=${session.username} admin=${session.isAdmin}`);
   req.user = session;
   req.sessionToken = token;
   next();
@@ -162,6 +164,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
  */
 export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
   if (!req.user?.isAdmin) {
+    console.log(`[auth] FORBIDDEN ${req.method} ${req.originalUrl} - user=${req.user?.username} is not admin`);
     res.status(403).json({
       success: false,
       error: { code: 'FORBIDDEN', message: 'Administrator privileges required' },

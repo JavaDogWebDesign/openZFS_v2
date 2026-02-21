@@ -61,6 +61,7 @@ export function errorHandler(
   // --- Zod validation errors ---------------------------------------------------
   if (err instanceof ZodError) {
     const { message, details } = formatZodError(err);
+    console.log(`[error] VALIDATION ${_req.method} ${_req.originalUrl} - ${message}`);
     const body: ApiError = {
       success: false,
       error: { code: 'VALIDATION_ERROR', message, details },
@@ -71,6 +72,7 @@ export function errorHandler(
 
   // --- Known application errors ------------------------------------------------
   if (err instanceof AppError) {
+    console.log(`[error] APP ${_req.method} ${_req.originalUrl} - ${err.statusCode} ${err.code}: ${err.message}`);
     const body: ApiError = {
       success: false,
       error: {
@@ -84,7 +86,7 @@ export function errorHandler(
   }
 
   // --- Unexpected errors -------------------------------------------------------
-  console.error('[error-handler]', err);
+  console.error(`[error] UNEXPECTED ${_req.method} ${_req.originalUrl}`, err);
 
   const body: ApiError = {
     success: false,
