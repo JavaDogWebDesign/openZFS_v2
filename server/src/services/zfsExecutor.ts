@@ -221,15 +221,27 @@ export class ZfsExecutor {
     return this.zfs(...args);
   }
 
-  /** Create a pool */
+  /** Pool-level properties that go with `zpool create -o` */
+  private static POOL_PROPERTIES = new Set([
+    'ashift', 'autoexpand', 'autoreplace', 'autotrim', 'cachefile',
+    'comment', 'compatibility', 'delegation', 'failmode', 'listsnapshots',
+    'multihost', 'version',
+  ]);
+
+  /** Create a pool. Splits options into pool props (-o) and dataset props (-O). */
   async createPool(name: string, vdevArgs: string[], properties?: Record<string, string>): Promise<CommandResult> {
     const args = ['create'];
     if (properties) {
       for (const [key, value] of Object.entries(properties)) {
-        args.push('-o', `${key}=${value}`);
+        if (ZfsExecutor.POOL_PROPERTIES.has(key)) {
+          args.push('-o', `${key}=${value}`);
+        } else {
+          args.push('-O', `${key}=${value}`);
+        }
       }
     }
     args.push(name, ...vdevArgs);
+    console.log(`[zfs] zpool ${args.join(' ')}`);
     return this.run(ZPOOL_BIN, args, { destructive: true });
   }
 
