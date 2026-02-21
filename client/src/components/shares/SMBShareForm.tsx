@@ -138,22 +138,42 @@ function UserPicker({ label, hint, users, loading, selected, onChange }: UserPic
 export function SMBShareForm({ open, share, onClose, onSaved }: SMBShareFormProps) {
   const isEdit = !!share;
 
-  const [name, setName] = useState(share?.name ?? '');
-  const [path, setPath] = useState(share?.path ?? '');
-  const [comment, setComment] = useState(share?.comment ?? '');
-  const [browseable, setBrowseable] = useState(share?.browseable ?? true);
-  const [readonly, setReadonly] = useState(share?.readonly ?? false);
-  const [guestOk, setGuestOk] = useState(share?.guestOk ?? false);
-  const [validUsers, setValidUsers] = useState<string[]>(share?.validUsers ?? []);
-  const [writeList, setWriteList] = useState<string[]>(share?.writeList ?? []);
-  const [createMask, setCreateMask] = useState(share?.createMask ?? '0664');
-  const [directoryMask, setDirectoryMask] = useState(share?.directoryMask ?? '0775');
-  const [forceUser, setForceUser] = useState(share?.forceUser ?? '');
-  const [forceGroup, setForceGroup] = useState(share?.forceGroup ?? '');
-  const [recycleEnabled, setRecycleEnabled] = useState(!!share?.recycleRepository);
+  const [name, setName] = useState('');
+  const [path, setPath] = useState('');
+  const [comment, setComment] = useState('');
+  const [browseable, setBrowseable] = useState(true);
+  const [readonly, setReadonly] = useState(false);
+  const [guestOk, setGuestOk] = useState(false);
+  const [validUsers, setValidUsers] = useState<string[]>([]);
+  const [writeList, setWriteList] = useState<string[]>([]);
+  const [createMask, setCreateMask] = useState('0664');
+  const [directoryMask, setDirectoryMask] = useState('0775');
+  const [forceUser, setForceUser] = useState('');
+  const [forceGroup, setForceGroup] = useState('');
+  const [recycleEnabled, setRecycleEnabled] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Reset form state when share prop or open state changes
+  useEffect(() => {
+    if (!open) return;
+    setName(share?.name ?? '');
+    setPath(share?.path ?? '');
+    setComment(share?.comment ?? '');
+    setBrowseable(share?.browseable ?? true);
+    setReadonly(share?.readonly ?? false);
+    setGuestOk(share?.guestOk ?? false);
+    setValidUsers(share?.validUsers ?? []);
+    setWriteList(share?.writeList ?? []);
+    setCreateMask(share?.createMask ?? '0664');
+    setDirectoryMask(share?.directoryMask ?? '0775');
+    setForceUser(share?.forceUser ?? '');
+    setForceGroup(share?.forceGroup ?? '');
+    setRecycleEnabled(!!share?.recycleRepository);
+    setShowAdvanced(false);
+    setError(null);
+  }, [open, share]);
 
   // Fetch system users when the form opens
   const [systemUsers, setSystemUsers] = useState<SystemUser[]>([]);
