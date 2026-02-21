@@ -279,7 +279,7 @@ export const shareApi = {
   },
 
   updateSmb(name: string, data: Partial<SMBShare>) {
-    return apiClient.patch<SMBShare>(`/shares/smb/${encodeURIComponent(name)}`, data);
+    return apiClient.put<SMBShare>(`/shares/smb/${encodeURIComponent(name)}`, data);
   },
 
   deleteSmb(name: string) {
@@ -295,7 +295,7 @@ export const shareApi = {
   },
 
   updateNfs(path: string, data: Partial<NFSShare>) {
-    return apiClient.patch<NFSShare>(`/shares/nfs/${encodeURIComponent(path)}`, data);
+    return apiClient.put<NFSShare>(`/shares/nfs/${encodeURIComponent(path)}`, data);
   },
 
   deleteNfs(path: string) {

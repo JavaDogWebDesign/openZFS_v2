@@ -1,7 +1,7 @@
-import { useState } from 'react';
-import { X } from 'lucide-react';
-import type { SMBShare } from '@zfs-manager/shared';
-import { shareApi } from '@/api/endpoints';
+import { useState, useEffect, useRef } from 'react';
+import { X, ChevronDown, Check } from 'lucide-react';
+import type { SMBShare, SystemUser } from '@zfs-manager/shared';
+import { shareApi, userApi } from '@/api/endpoints';
 
 interface SMBShareFormProps {
   open: boolean;
@@ -9,6 +9,131 @@ interface SMBShareFormProps {
   onClose: () => void;
   onSaved: () => void;
 }
+
+// ---------------------------------------------------------------------------
+// Multi-select user picker component
+// ---------------------------------------------------------------------------
+
+interface UserPickerProps {
+  label: string;
+  hint: string;
+  users: SystemUser[];
+  loading: boolean;
+  selected: string[];
+  onChange: (selected: string[]) => void;
+}
+
+function UserPicker({ label, hint, users, loading, selected, onChange }: UserPickerProps) {
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setDropdownOpen(false);
+      }
+    }
+    if (dropdownOpen) {
+      document.addEventListener('mousedown', handleClick);
+      return () => document.removeEventListener('mousedown', handleClick);
+    }
+  }, [dropdownOpen]);
+
+  const toggle = (username: string) => {
+    if (selected.includes(username)) {
+      onChange(selected.filter((u) => u !== username));
+    } else {
+      onChange([...selected, username]);
+    }
+  };
+
+  const remove = (username: string) => {
+    onChange(selected.filter((u) => u !== username));
+  };
+
+  return (
+    <div ref={ref} className="relative">
+      <label className="block text-sm font-medium text-foreground mb-1">{label}</label>
+
+      {/* Selected chips + trigger */}
+      <button
+        type="button"
+        onClick={() => setDropdownOpen(!dropdownOpen)}
+        className="flex w-full min-h-[38px] items-center gap-1 flex-wrap rounded-md border border-input bg-background px-3 py-1.5 text-sm text-left focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
+      >
+        {selected.length === 0 && (
+          <span className="text-muted-foreground">Select users...</span>
+        )}
+        {selected.map((username) => (
+          <span
+            key={username}
+            className="inline-flex items-center gap-1 rounded-md bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary"
+          >
+            {username}
+            <span
+              role="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                remove(username);
+              }}
+              className="hover:text-destructive cursor-pointer"
+            >
+              <X className="h-3 w-3" />
+            </span>
+          </span>
+        ))}
+        <ChevronDown className="ml-auto h-4 w-4 shrink-0 text-muted-foreground" />
+      </button>
+
+      <p className="mt-1 text-xs text-muted-foreground">{hint}</p>
+
+      {/* Dropdown */}
+      {dropdownOpen && (
+        <div className="absolute z-50 mt-1 max-h-48 w-full overflow-y-auto rounded-md border border-border bg-popover shadow-md">
+          {loading ? (
+            <div className="px-3 py-2 text-sm text-muted-foreground">Loading users...</div>
+          ) : users.length === 0 ? (
+            <div className="px-3 py-2 text-sm text-muted-foreground">No users found</div>
+          ) : (
+            users.map((user) => {
+              const isSelected = selected.includes(user.username);
+              return (
+                <button
+                  key={user.username}
+                  type="button"
+                  onClick={() => toggle(user.username)}
+                  className={`flex w-full items-center gap-2 px-3 py-2 text-sm hover:bg-accent transition-colors ${
+                    isSelected ? 'bg-accent/50' : ''
+                  }`}
+                >
+                  <span
+                    className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
+                      isSelected
+                        ? 'border-primary bg-primary text-primary-foreground'
+                        : 'border-input'
+                    }`}
+                  >
+                    {isSelected && <Check className="h-3 w-3" />}
+                  </span>
+                  <span className="font-medium">{user.username}</span>
+                  {user.fullName && (
+                    <span className="text-muted-foreground">({user.fullName})</span>
+                  )}
+                  <span className="ml-auto text-xs text-muted-foreground">UID {user.uid}</span>
+                </button>
+              );
+            })
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SMB Share Form
+// ---------------------------------------------------------------------------
 
 export function SMBShareForm({ open, share, onClose, onSaved }: SMBShareFormProps) {
   const isEdit = !!share;
@@ -19,8 +144,8 @@ export function SMBShareForm({ open, share, onClose, onSaved }: SMBShareFormProp
   const [browseable, setBrowseable] = useState(share?.browseable ?? true);
   const [readonly, setReadonly] = useState(share?.readonly ?? false);
   const [guestOk, setGuestOk] = useState(share?.guestOk ?? false);
-  const [validUsers, setValidUsers] = useState(share?.validUsers?.join(', ') ?? '');
-  const [writeList, setWriteList] = useState(share?.writeList?.join(', ') ?? '');
+  const [validUsers, setValidUsers] = useState<string[]>(share?.validUsers ?? []);
+  const [writeList, setWriteList] = useState<string[]>(share?.writeList ?? []);
   const [createMask, setCreateMask] = useState(share?.createMask ?? '0664');
   const [directoryMask, setDirectoryMask] = useState(share?.directoryMask ?? '0775');
   const [forceUser, setForceUser] = useState(share?.forceUser ?? '');
@@ -28,12 +153,32 @@ export function SMBShareForm({ open, share, onClose, onSaved }: SMBShareFormProp
   const [recycleEnabled, setRecycleEnabled] = useState(!!share?.recycleRepository);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Fetch system users when the form opens
+  const [systemUsers, setSystemUsers] = useState<SystemUser[]>([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setUsersLoading(true);
+    userApi.list().then((result) => {
+      if (result.success) {
+        // Filter out system accounts (uid < 1000) except root
+        const humanUsers = (result.data ?? []).filter(
+          (u) => u.uid >= 1000 || u.username === 'root',
+        );
+        setSystemUsers(humanUsers);
+      }
+    }).finally(() => setUsersLoading(false));
+  }, [open]);
 
   if (!open) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
+    setError(null);
 
     try {
       const shareData = {
@@ -43,8 +188,8 @@ export function SMBShareForm({ open, share, onClose, onSaved }: SMBShareFormProp
         browseable,
         readonly,
         guestOk,
-        validUsers: validUsers ? validUsers.split(',').map((u) => u.trim()).filter(Boolean) : undefined,
-        writeList: writeList ? writeList.split(',').map((u) => u.trim()).filter(Boolean) : undefined,
+        validUsers: validUsers.length > 0 ? validUsers : undefined,
+        writeList: writeList.length > 0 ? writeList : undefined,
         createMask,
         directoryMask,
         forceUser: forceUser || undefined,
@@ -59,9 +204,11 @@ export function SMBShareForm({ open, share, onClose, onSaved }: SMBShareFormProp
       if (result.success) {
         onSaved();
         onClose();
+      } else {
+        setError(result.error?.message ?? 'Failed to save share');
       }
     } catch {
-      // Error handled by API client
+      setError('Network error while saving share');
     } finally {
       setIsSubmitting(false);
     }
@@ -82,6 +229,12 @@ export function SMBShareForm({ open, share, onClose, onSaved }: SMBShareFormProp
         </div>
 
         <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6 space-y-4">
+          {error && (
+            <div className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              {error}
+            </div>
+          )}
+
           {/* Name */}
           <div>
             <label className="block text-sm font-medium text-foreground mb-1">Share Name</label>
@@ -120,6 +273,25 @@ export function SMBShareForm({ open, share, onClose, onSaved }: SMBShareFormProp
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
             />
           </div>
+
+          {/* User Access - multi-select dropdowns */}
+          <UserPicker
+            label="Valid Users"
+            hint="Users allowed to access this share. Leave empty to allow all users."
+            users={systemUsers}
+            loading={usersLoading}
+            selected={validUsers}
+            onChange={setValidUsers}
+          />
+
+          <UserPicker
+            label="Write List"
+            hint="Users with write access, even if the share is set to read-only."
+            users={systemUsers}
+            loading={usersLoading}
+            selected={writeList}
+            onChange={setWriteList}
+          />
 
           {/* Basic options */}
           <div className="space-y-3">
@@ -166,26 +338,6 @@ export function SMBShareForm({ open, share, onClose, onSaved }: SMBShareFormProp
 
           {showAdvanced && (
             <div className="space-y-4 rounded-lg border border-border p-4">
-              <div>
-                <label className="block text-sm font-medium text-foreground mb-1">Valid Users</label>
-                <input
-                  type="text"
-                  value={validUsers}
-                  onChange={(e) => setValidUsers(e.target.value)}
-                  placeholder="user1, user2, @group1"
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-foreground mb-1">Write List</label>
-                <input
-                  type="text"
-                  value={writeList}
-                  onChange={(e) => setWriteList(e.target.value)}
-                  placeholder="user1, @group1"
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
-                />
-              </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-sm font-medium text-foreground mb-1">Create Mask</label>
