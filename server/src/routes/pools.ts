@@ -30,10 +30,15 @@ const router = Router();
 // Schemas
 // ---------------------------------------------------------------------------
 
+const VdevSpec = z.object({
+  type: z.string(),
+  disks: z.array(z.string()).min(1),
+});
+
 const CreatePoolSchema = z.object({
   name: z.string().min(1).max(255).regex(/^[a-zA-Z][a-zA-Z0-9_.-]*$/, 'Invalid pool name'),
-  vdevs: z.array(z.string()).min(1, 'At least one vdev specification is required'),
-  properties: z.record(z.string()).optional(),
+  vdevs: z.array(VdevSpec).min(1, 'At least one vdev specification is required'),
+  options: z.record(z.string()).optional(),
   mountpoint: z.string().optional(),
 });
 
@@ -79,14 +84,24 @@ router.post(
   validate(CreatePoolSchema),
   auditLog('pool.create', {
     target: (req) => req.body.name,
-    details: (req) => ({ vdevs: req.body.vdevs, properties: req.body.properties }),
+    details: (req) => ({ vdevs: req.body.vdevs, options: req.body.options }),
   }),
   async (req, res, next) => {
     try {
-      const { name, vdevs, properties } = req.body as z.infer<typeof CreatePoolSchema>;
+      const { name, vdevs, options } = req.body as z.infer<typeof CreatePoolSchema>;
+
+      // Flatten vdev specs into zpool create args: e.g. ["mirror", "sdb", "sdc", "mirror", "sdd", "sde"]
+      const vdevArgs: string[] = [];
+      for (const vdev of vdevs) {
+        // 'stripe' means no topology keyword — just list the disks
+        if (vdev.type !== 'stripe') {
+          vdevArgs.push(vdev.type);
+        }
+        vdevArgs.push(...vdev.disks);
+      }
 
       const executor = getExecutor();
-      const result = await executor.createPool(name, vdevs, properties);
+      const result = await executor.createPool(name, vdevArgs, options);
 
       if (result.exitCode !== 0) {
         throw new AppError(400, 'POOL_CREATE_FAILED', `Failed to create pool: ${result.stderr}`);

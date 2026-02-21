@@ -98,7 +98,7 @@ export function RaidWizard({ onComplete, onCancel }: RaidWizardProps) {
         const end = i === state.vdevCount - 1 ? state.selectedDisks.length : start + disksPerVdev;
         vdevs.push({
           type: state.raidType,
-          disks: state.selectedDisks.slice(start, end).map((d) => d.name),
+          disks: state.selectedDisks.slice(start, end).map((d) => d.path),
         });
       }
 
