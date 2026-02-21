@@ -43,9 +43,9 @@ export function createApp(): express.Application {
     contentSecurityPolicy: config.nodeEnv === 'production' ? undefined : false,
   }));
 
-  // CORS: allow the configured client origin
+  // CORS: in development allow any origin (LAN access), in production use configured origin
   app.use(cors({
-    origin: config.corsOrigin,
+    origin: config.nodeEnv === 'development' ? true : config.corsOrigin,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
