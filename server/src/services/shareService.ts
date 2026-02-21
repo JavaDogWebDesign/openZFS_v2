@@ -81,11 +81,23 @@ export async function createSmbShare(share: SMBShare): Promise<SMBShare> {
     throw new AppError(409, 'SHARE_EXISTS', `SMB share "${share.name}" already exists`);
   }
 
+  // Ensure the share path directory exists
+  try {
+    await fs.mkdir(share.path, { recursive: true });
+    console.log(`[shares] Ensured share path exists: ${share.path}`);
+  } catch (err) {
+    console.error(`[shares] Failed to create share path ${share.path}:`, err);
+    throw new AppError(500, 'PATH_CREATE_FAILED', `Failed to create share path: ${share.path}`);
+  }
+
   const config = generateSmbShareConfig(share);
   const filePath = path.join(SMB_SHARES_DIR, `${SMB_FILE_PREFIX}${share.name}.conf`);
 
   await fs.mkdir(SMB_SHARES_DIR, { recursive: true });
   await fs.writeFile(filePath, config, 'utf-8');
+  console.log(`[shares] Wrote SMB config: ${filePath}`);
+
+  await ensureSmbInclude();
   await restartSmb();
 
   return share;
@@ -105,6 +117,8 @@ export async function updateSmbShare(name: string, updates: Partial<SMBShare>): 
   const filePath = path.join(SMB_SHARES_DIR, `${SMB_FILE_PREFIX}${name}.conf`);
 
   await fs.writeFile(filePath, config, 'utf-8');
+  console.log(`[shares] Updated SMB config: ${filePath}`);
+  await ensureSmbInclude();
   await restartSmb();
 
   return updated;
@@ -407,17 +421,60 @@ function parseNfsExport(content: string): NFSShare | null {
 // ---------------------------------------------------------------------------
 
 /**
+ * Ensure the main smb.conf includes our share config directory.
+ * Without this include line, Samba never reads the per-share config files.
+ */
+async function ensureSmbInclude(): Promise<void> {
+  const SMB_CONF = '/etc/samba/smb.conf';
+  const includeGlob = `include = ${SMB_SHARES_DIR}/*.conf`;
+
+  try {
+    let conf = await fs.readFile(SMB_CONF, 'utf-8');
+
+    // Check if any form of include for our directory already exists
+    if (conf.includes(SMB_SHARES_DIR)) {
+      console.log('[shares] smb.conf already includes our share directory');
+      return;
+    }
+
+    // Append the include directive at the end of the [global] section or end of file
+    // Using the glob form so all .conf files in the directory are loaded
+    conf = conf.trimEnd() + '\n\n# ZFS Manager managed shares\n' + includeGlob + '\n';
+    await fs.writeFile(SMB_CONF, conf, 'utf-8');
+    console.log(`[shares] Added include directive to ${SMB_CONF}: ${includeGlob}`);
+  } catch (err) {
+    console.error('[shares] Failed to update smb.conf with include directive:', err);
+    throw new AppError(500, 'SMB_CONFIG_ERROR', 'Failed to update Samba configuration to include managed shares');
+  }
+}
+
+/**
  * Restart the Samba services to apply configuration changes.
  */
 async function restartSmb(): Promise<void> {
+  // Validate config before restarting
+  try {
+    const { stderr } = await execFile('testparm', ['-s', '--suppress-prompt'], { timeout: 10_000 });
+    console.log('[shares] testparm validation passed');
+    if (stderr) console.log('[shares] testparm warnings:', stderr);
+  } catch (err) {
+    const error = err as Error & { stderr?: string };
+    console.error('[shares] testparm validation FAILED:', error.stderr ?? error.message);
+    throw new AppError(500, 'SMB_CONFIG_INVALID', `Samba config validation failed: ${error.stderr ?? error.message}`);
+  }
+
+  // Restart smbd (Debian/Ubuntu use smbd, RHEL/CentOS use smb)
   try {
     await execFile('systemctl', ['restart', 'smbd']);
+    console.log('[shares] smbd restarted successfully');
   } catch {
-    // Try nmbd as well, but don't fail if it's not running
     try {
       await execFile('systemctl', ['restart', 'smb']);
-    } catch {
-      console.warn('[shares] Failed to restart Samba service');
+      console.log('[shares] smb restarted successfully');
+    } catch (err) {
+      const error = err as Error & { stderr?: string };
+      console.error('[shares] Failed to restart Samba:', error.stderr ?? error.message);
+      throw new AppError(500, 'SMB_RESTART_FAILED', 'Failed to restart Samba service');
     }
   }
 }
@@ -428,7 +485,9 @@ async function restartSmb(): Promise<void> {
 async function reexportNfs(): Promise<void> {
   try {
     await execFile('exportfs', ['-ra']);
-  } catch {
-    console.warn('[shares] Failed to re-export NFS shares');
+    console.log('[shares] NFS exports reloaded successfully');
+  } catch (err) {
+    const error = err as Error & { stderr?: string };
+    console.error('[shares] Failed to re-export NFS shares:', error.stderr ?? error.message);
   }
 }
