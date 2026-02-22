@@ -231,6 +231,14 @@ export const userApi = {
   setSmbPassword(username: string, password: string) {
     return apiClient.post<void>(`/users/${encodeURIComponent(username)}/smb-password`, { password });
   },
+
+  getShares(username: string) {
+    return apiClient.get<string[]>(`/users/${encodeURIComponent(username)}/shares`);
+  },
+
+  setShares(username: string, shares: string[]) {
+    return apiClient.post<string[]>(`/users/${encodeURIComponent(username)}/shares`, { shares });
+  },
 };
 
 // ----- Groups -----

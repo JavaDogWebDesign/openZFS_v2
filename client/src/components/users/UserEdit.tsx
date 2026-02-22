@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { X, Save } from 'lucide-react';
-import type { SystemUser } from '@zfs-manager/shared';
-import { userApi } from '@/api/endpoints';
+import type { SystemUser, SMBShare } from '@zfs-manager/shared';
+import { userApi, shareApi } from '@/api/endpoints';
 
 interface UserEditProps {
   open: boolean;
@@ -19,6 +19,9 @@ export function UserEdit({ open, user, onClose, onSaved, availableGroups = [] }:
   const [newPassword, setNewPassword] = useState('');
   const [changeSmbPassword, setChangeSmbPassword] = useState(false);
   const [smbPassword, setSmbPassword] = useState('');
+  const [selectedShares, setSelectedShares] = useState<string[]>([]);
+  const [availableShares, setAvailableShares] = useState<SMBShare[]>([]);
+  const [sharesLoading, setSharesLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -33,6 +36,20 @@ export function UserEdit({ open, user, onClose, onSaved, availableGroups = [] }:
     setChangeSmbPassword(false);
     setSmbPassword('');
     setError(null);
+
+    // Fetch available shares and current assignments
+    setSharesLoading(true);
+    Promise.all([
+      shareApi.listSmb(),
+      userApi.getShares(user.username),
+    ]).then(([sharesResult, assignedResult]) => {
+      if (sharesResult.success) {
+        setAvailableShares(sharesResult.data ?? []);
+      }
+      if (assignedResult.success) {
+        setSelectedShares(assignedResult.data ?? []);
+      }
+    }).finally(() => setSharesLoading(false));
   }, [open, user]);
 
   if (!open || !user) return null;
@@ -40,6 +57,12 @@ export function UserEdit({ open, user, onClose, onSaved, availableGroups = [] }:
   const toggleGroup = (group: string) => {
     setSelectedGroups((prev) =>
       prev.includes(group) ? prev.filter((g) => g !== group) : [...prev, group],
+    );
+  };
+
+  const toggleShare = (shareName: string) => {
+    setSelectedShares((prev) =>
+      prev.includes(shareName) ? prev.filter((s) => s !== shareName) : [...prev, shareName],
     );
   };
 
@@ -62,6 +85,14 @@ export function UserEdit({ open, user, onClose, onSaved, availableGroups = [] }:
           setError(`User updated but SMB password failed: ${smbResult.error?.message}`);
           setIsSubmitting(false);
           return;
+        }
+      }
+
+      // Update share assignments
+      if (updateResult.success) {
+        const shareResult = await userApi.setShares(user.username, selectedShares);
+        if (!shareResult.success) {
+          console.error('[users] Failed to update share assignments:', shareResult.error);
         }
       }
 
@@ -156,6 +187,37 @@ export function UserEdit({ open, user, onClose, onSaved, availableGroups = [] }:
                 </button>
               ))}
             </div>
+          </div>
+
+          {/* Share Access */}
+          <div className="rounded-lg border border-border p-4 space-y-3">
+            <div>
+              <label className="text-sm font-medium text-foreground">Share Access</label>
+              <p className="text-xs text-muted-foreground">Select SMB shares this user can read and write to</p>
+            </div>
+            {sharesLoading ? (
+              <p className="text-xs text-muted-foreground">Loading shares...</p>
+            ) : availableShares.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No shares configured yet</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {availableShares.map((share) => (
+                  <button
+                    key={share.name}
+                    type="button"
+                    onClick={() => toggleShare(share.name)}
+                    className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                      selectedShares.includes(share.name)
+                        ? 'border-primary bg-primary/10 text-primary'
+                        : 'border-border text-muted-foreground hover:border-primary/50'
+                    }`}
+                  >
+                    {share.name}
+                    <span className="ml-1 text-[10px] opacity-60">{share.path}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Change Password */}

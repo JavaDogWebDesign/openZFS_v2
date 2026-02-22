@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { X, UserPlus } from 'lucide-react';
-import { userApi } from '@/api/endpoints';
+import type { SMBShare } from '@zfs-manager/shared';
+import { userApi, shareApi } from '@/api/endpoints';
 
 interface UserCreateProps {
   open: boolean;
@@ -20,8 +21,22 @@ export function UserCreate({ open, onClose, onCreated, availableGroups = [] }: U
   const [enableSmb, setEnableSmb] = useState(true);
   const [smbPassword, setSmbPassword] = useState('');
   const [useSamePassword, setUseSamePassword] = useState(true);
+  const [selectedShares, setSelectedShares] = useState<string[]>([]);
+  const [availableShares, setAvailableShares] = useState<SMBShare[]>([]);
+  const [sharesLoading, setSharesLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Fetch available SMB shares when form opens
+  useEffect(() => {
+    if (!open) return;
+    setSharesLoading(true);
+    shareApi.listSmb().then((result) => {
+      if (result.success) {
+        setAvailableShares(result.data ?? []);
+      }
+    }).finally(() => setSharesLoading(false));
+  }, [open]);
 
   if (!open) return null;
 
@@ -30,6 +45,12 @@ export function UserCreate({ open, onClose, onCreated, availableGroups = [] }: U
   const toggleGroup = (group: string) => {
     setSelectedGroups((prev) =>
       prev.includes(group) ? prev.filter((g) => g !== group) : [...prev, group],
+    );
+  };
+
+  const toggleShare = (shareName: string) => {
+    setSelectedShares((prev) =>
+      prev.includes(shareName) ? prev.filter((s) => s !== shareName) : [...prev, shareName],
     );
   };
 
@@ -60,6 +81,15 @@ export function UserCreate({ open, onClose, onCreated, availableGroups = [] }: U
             }
           }
         }
+
+        // Assign shares if any selected
+        if (selectedShares.length > 0) {
+          const shareResult = await userApi.setShares(username, selectedShares);
+          if (!shareResult.success) {
+            console.error('[users] Failed to assign shares:', shareResult.error);
+          }
+        }
+
         onCreated();
         onClose();
       } else {
@@ -198,6 +228,37 @@ export function UserCreate({ open, onClose, onCreated, availableGroups = [] }: U
                     />
                   </div>
                 )}
+              </div>
+            )}
+          </div>
+
+          {/* Share Access */}
+          <div className="rounded-lg border border-border p-4 space-y-3">
+            <div>
+              <label className="text-sm font-medium text-foreground">Share Access</label>
+              <p className="text-xs text-muted-foreground">Select SMB shares this user can read and write to</p>
+            </div>
+            {sharesLoading ? (
+              <p className="text-xs text-muted-foreground">Loading shares...</p>
+            ) : availableShares.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No shares configured yet</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {availableShares.map((share) => (
+                  <button
+                    key={share.name}
+                    type="button"
+                    onClick={() => toggleShare(share.name)}
+                    className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                      selectedShares.includes(share.name)
+                        ? 'border-primary bg-primary/10 text-primary'
+                        : 'border-border text-muted-foreground hover:border-primary/50'
+                    }`}
+                  >
+                    {share.name}
+                    <span className="ml-1 text-[10px] opacity-60">{share.path}</span>
+                  </button>
+                ))}
               </div>
             )}
           </div>

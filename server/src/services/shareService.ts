@@ -158,25 +158,8 @@ export async function createSmbShare(share: SMBShare): Promise<SMBShare> {
     throw new AppError(500, 'PATH_CREATE_FAILED', `Failed to create share path: ${share.path}`);
   }
 
-  // Set filesystem permissions so valid users can actually write.
-  // chmod 2775 = setgid + rwxrwxr-x (group-writable, new files inherit group)
-  try {
-    await execFile('chmod', ['2775', share.path]);
-    console.log(`[shares] Set permissions 2775 on ${share.path}`);
-
-    // If there are valid users, chown to the first valid user so they have access.
-    // If forceUser/forceGroup is set, use those instead.
-    const owner = share.forceUser || share.validUsers?.[0];
-    const group = share.forceGroup || (share.validUsers?.[0] ? share.validUsers[0] : undefined);
-    if (owner) {
-      const chownTarget = group ? `${owner}:${group}` : owner;
-      await execFile('chown', [chownTarget, share.path]);
-      console.log(`[shares] Set ownership ${chownTarget} on ${share.path}`);
-    }
-  } catch (err) {
-    console.error(`[shares] Failed to set permissions on ${share.path}:`, err);
-    // Non-fatal — share will still be created, just may have permission issues
-  }
+  // Set filesystem permissions so valid users can actually write
+  await setSharePermissions(share);
 
   // Add to our managed shares file
   const managed = await readManagedShares();
@@ -200,6 +183,9 @@ export async function updateSmbShare(name: string, updates: Partial<SMBShare>): 
   }
 
   const updated: SMBShare = { ...existing, ...updates, name };
+
+  // Update filesystem permissions for new user assignments
+  await setSharePermissions(updated);
 
   // Remove from smb.conf if it was defined there (move to managed file)
   await removeSectionFromSmbConf(name);
@@ -368,6 +354,107 @@ function parseSmbShareConfig(content: string): SMBShare | null {
     recycleRepository: get('recycle:repository'),
     enabled: true,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem permissions
+// ---------------------------------------------------------------------------
+
+/**
+ * Set filesystem permissions on a share directory so all assigned users
+ * can actually read/write files.
+ *
+ * Uses POSIX ACLs (setfacl) to grant each user in validUsers and writeList
+ * explicit rwx access, plus a default ACL so new files/dirs inherit the same.
+ */
+async function setSharePermissions(share: SMBShare): Promise<void> {
+  try {
+    // Ensure base permissions: setgid + rwxrwxr-x
+    await execFile('chmod', ['2775', share.path]);
+    console.log(`[shares] Set permissions 2775 on ${share.path}`);
+
+    // Collect all users who need filesystem access
+    const users = new Set<string>();
+    if (share.validUsers) share.validUsers.forEach((u) => users.add(u));
+    if (share.writeList) share.writeList.forEach((u) => users.add(u));
+    if (share.forceUser) users.add(share.forceUser);
+
+    if (users.size === 0) return;
+
+    // Set ACLs for each user
+    for (const user of users) {
+      try {
+        // Access ACL: user gets rwx on the directory itself
+        await execFile('setfacl', ['-m', `u:${user}:rwx`, share.path]);
+        // Default ACL: new files/subdirs inherit rwx for this user
+        await execFile('setfacl', ['-d', '-m', `u:${user}:rwx`, share.path]);
+        console.log(`[shares] Set ACL u:${user}:rwx on ${share.path}`);
+      } catch (err) {
+        console.error(`[shares] Failed to set ACL for ${user} on ${share.path}:`, err);
+      }
+    }
+
+    // Also set ownership to the first user for compatibility
+    const owner = share.forceUser || share.validUsers?.[0];
+    const group = share.forceGroup || owner;
+    if (owner) {
+      const chownTarget = group ? `${owner}:${group}` : owner;
+      await execFile('chown', [chownTarget, share.path]);
+      console.log(`[shares] Set ownership ${chownTarget} on ${share.path}`);
+    }
+  } catch (err) {
+    console.error(`[shares] Failed to set permissions on ${share.path}:`, err);
+    // Non-fatal — share will still work, just may have permission issues
+  }
+}
+
+// ---------------------------------------------------------------------------
+// User-share assignment helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Get which shares a user is assigned to (appears in validUsers or writeList).
+ */
+export async function getUserShareAssignments(username: string): Promise<string[]> {
+  const allShares = await listSmbShares();
+  return allShares
+    .filter((s) =>
+      s.validUsers?.includes(username) || s.writeList?.includes(username),
+    )
+    .map((s) => s.name);
+}
+
+/**
+ * Assign a user to a set of shares.
+ *
+ * For each named share: adds the user to both validUsers and writeList
+ * (if not already present) and updates filesystem ACLs.
+ *
+ * Shares NOT in the list will have the user removed.
+ */
+export async function assignUserToShares(username: string, shareNames: string[]): Promise<void> {
+  const allShares = await listSmbShares();
+  const wantedSet = new Set(shareNames);
+
+  for (const share of allShares) {
+    const isAssigned =
+      share.validUsers?.includes(username) || share.writeList?.includes(username);
+    const shouldBeAssigned = wantedSet.has(share.name);
+
+    if (shouldBeAssigned && !isAssigned) {
+      // Add user to this share
+      const validUsers = [...(share.validUsers ?? []), username];
+      const writeList = [...(share.writeList ?? []), username];
+      await updateSmbShare(share.name, { validUsers, writeList });
+      console.log(`[shares] Added ${username} to share "${share.name}"`);
+    } else if (!shouldBeAssigned && isAssigned) {
+      // Remove user from this share
+      const validUsers = (share.validUsers ?? []).filter((u) => u !== username);
+      const writeList = (share.writeList ?? []).filter((u) => u !== username);
+      await updateSmbShare(share.name, { validUsers, writeList });
+      console.log(`[shares] Removed ${username} from share "${share.name}"`);
+    }
+  }
 }
 
 // ============================================================================

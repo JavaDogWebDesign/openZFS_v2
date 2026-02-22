@@ -1,12 +1,14 @@
 /**
  * User management routes.
  *
- * GET    /api/users                      - List all users
- * POST   /api/users                      - Create a user
- * GET    /api/users/:username            - Get a user
- * PUT    /api/users/:username            - Modify a user
- * DELETE /api/users/:username            - Delete a user
- * POST   /api/users/:username/smb-password - Set SMB password
+ * GET    /api/users                          - List all users
+ * POST   /api/users                          - Create a user
+ * GET    /api/users/:username                - Get a user
+ * PUT    /api/users/:username                - Modify a user
+ * DELETE /api/users/:username                - Delete a user
+ * POST   /api/users/:username/smb-password   - Set SMB password
+ * GET    /api/users/:username/shares         - Get user's share assignments
+ * POST   /api/users/:username/shares         - Set user's share assignments
  */
 
 import { Router } from 'express';
@@ -16,6 +18,7 @@ import { validate } from '../middleware/validate.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { auditLog } from '../middleware/audit.js';
 import * as userService from '../services/userService.js';
+import * as shareService from '../services/shareService.js';
 import { AppError } from '../middleware/errorHandler.js';
 
 const router = Router();
@@ -205,6 +208,54 @@ router.post(
         success: true,
         data: null,
         message: `SMB password set for "${req.params.username}"`,
+      };
+      res.json(response);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// GET /:username/shares - Get user's share assignments
+// ---------------------------------------------------------------------------
+
+router.get('/:username/shares', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const shares = await shareService.getUserShareAssignments(req.params.username);
+    const response: ApiResponse<string[]> = { success: true, data: shares };
+    res.json(response);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /:username/shares - Set user's share assignments
+// ---------------------------------------------------------------------------
+
+const SetShareAssignmentsSchema = z.object({
+  shares: z.array(z.string()),
+});
+
+router.post(
+  '/:username/shares',
+  requireAuth,
+  requireAdmin,
+  validate(SetShareAssignmentsSchema),
+  auditLog('user.modify', {
+    target: (req) => req.params.username,
+    details: (req) => ({ action: 'share-assignment', shares: req.body.shares }),
+  }),
+  async (req, res, next) => {
+    try {
+      const { shares } = req.body as z.infer<typeof SetShareAssignmentsSchema>;
+      await shareService.assignUserToShares(req.params.username, shares);
+
+      const response: ApiResponse<string[]> = {
+        success: true,
+        data: shares,
+        message: `Share assignments updated for "${req.params.username}"`,
       };
       res.json(response);
     } catch (err) {
