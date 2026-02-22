@@ -521,12 +521,16 @@ function parseNfsExport(content: string): NFSShare | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Ensure smb.conf includes our managed shares file.
+ * Ensure smb.conf includes our managed shares file in the [global] section.
  *
  * Samba's `include` does NOT support globs (*.conf) — it needs an
  * exact file path. So we use a single file for all managed shares.
  *
- * Also cleans up any stray/broken include lines from earlier versions.
+ * This function:
+ * 1. Strips ALL include lines (ours + stray ones from earlier versions)
+ * 2. Re-inserts our include at the end of [global], before any share sections
+ *
+ * This ensures correct placement even if the user never touches the CLI.
  */
 async function ensureSmbInclude(): Promise<void> {
   const includeLine = `include = ${MANAGED_SHARES_FILE}`;
@@ -534,46 +538,33 @@ async function ensureSmbInclude(): Promise<void> {
   try {
     let conf = await fs.readFile(SMB_CONF, 'utf-8');
 
-    // Clean up stray includes from earlier buggy versions
-    const strayPatterns = [
-      /\n?.*include\s*=\s*\/etc\/samba\/smb\.conf\.d\/\*\.conf.*\n?/g,
-      /\n?.*include\s*=\s*\/etc\/samba\/openzfs-shares\.conf.*\n?/g,
-      /\n?# OpenZFS Manager managed shares\n?/g,
+    // Strip ALL our include lines and stray ones — we'll re-add in the right place
+    const stripPatterns = [
+      /\n?[^\n#;]*include\s*=\s*\/etc\/samba\/zfs-manager-shares\.conf[^\n]*\n?/g,
+      /\n?[^\n#;]*include\s*=\s*\/etc\/samba\/smb\.conf\.d\/[^\n]*\n?/g,
+      /\n?[^\n#;]*include\s*=\s*\/etc\/samba\/openzfs-shares\.conf[^\n]*\n?/g,
       /\n?# ZFS Manager managed shares\n?/g,
+      /\n?# OpenZFS Manager managed shares\n?/g,
     ];
-    let cleaned = false;
-    for (const pattern of strayPatterns) {
-      if (pattern.test(conf)) {
-        conf = conf.replace(pattern, '\n');
-        cleaned = true;
-      }
+
+    for (const pattern of stripPatterns) {
+      conf = conf.replace(pattern, '\n');
     }
 
-    // Already has our correct include?
-    if (conf.includes(MANAGED_SHARES_FILE)) {
-      if (cleaned) {
-        // Write the cleaned version
-        conf = conf.replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
-        await fs.writeFile(SMB_CONF, conf, 'utf-8');
-        console.log('[shares] Cleaned stray includes from smb.conf');
-      }
-      console.log('[shares] smb.conf already includes our managed shares file');
-      return;
-    }
-
-    // Insert the include at the end of [global] (before the first non-global section)
+    // Now insert at the end of [global] (right before the first share section)
+    // Look for the first [section] that isn't [global]
     const globalEnd = conf.search(/\n\[(?!global\])/i);
     if (globalEnd !== -1) {
       const before = conf.slice(0, globalEnd);
       const after = conf.slice(globalEnd);
-      conf = before + '\n\n# ZFS Manager managed shares\n' + includeLine + '\n' + after;
+      conf = before.trimEnd() + '\n\n# ZFS Manager managed shares\n' + includeLine + '\n' + after;
     } else {
       conf = conf.trimEnd() + '\n\n# ZFS Manager managed shares\n' + includeLine + '\n';
     }
 
     conf = conf.replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
     await fs.writeFile(SMB_CONF, conf, 'utf-8');
-    console.log(`[shares] Added include to smb.conf: ${includeLine}`);
+    console.log(`[shares] Ensured include in [global]: ${includeLine}`);
   } catch (err) {
     console.error('[shares] Failed to update smb.conf:', err);
     throw new AppError(500, 'SMB_CONFIG_ERROR', 'Failed to update Samba configuration');
