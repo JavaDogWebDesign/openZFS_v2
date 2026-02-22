@@ -1,9 +1,14 @@
 /**
  * File sharing service for SMB (Samba) and NFS exports.
  *
- * SMB shares are managed via include files in /etc/samba/smb.conf.d/
- * or by editing the main smb.conf. NFS exports are managed via
- * individual files in /etc/exports.d/.
+ * Managed SMB shares are stored in a single file:
+ *   /etc/samba/zfs-manager-shares.conf
+ * which is included from the main smb.conf.
+ *
+ * The listing also reads shares defined directly in smb.conf
+ * so the UI shows everything Samba is actually serving.
+ *
+ * NFS exports are managed via individual files in /etc/exports.d/.
  *
  * After any change, the relevant service is restarted to apply
  * the new configuration.
@@ -14,7 +19,6 @@
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
-import path from 'node:path';
 import type { SMBShare, NFSShare, NFSAccessRule } from '@zfs-manager/shared';
 import { AppError } from '../middleware/errorHandler.js';
 
@@ -26,14 +30,11 @@ const execFile = promisify(execFileCb);
 
 const SMB_CONF = '/etc/samba/smb.conf';
 
-/** Directory for individual SMB share include files */
-const SMB_SHARES_DIR = '/etc/samba/smb.conf.d';
+/** Single file where all managed shares live */
+const MANAGED_SHARES_FILE = '/etc/samba/zfs-manager-shares.conf';
 
 /** Directory for individual NFS export files */
 const NFS_EXPORTS_DIR = '/etc/exports.d';
-
-/** Prefix for managed SMB share files */
-const SMB_FILE_PREFIX = 'zfs-manager-';
 
 /** Prefix for managed NFS export files */
 const NFS_FILE_PREFIX = 'zfs-manager-';
@@ -46,14 +47,14 @@ const SKIP_SECTIONS = new Set(['global', 'homes', 'printers', 'print$', 'IPC$'])
 // ============================================================================
 
 /**
- * List ALL SMB shares by parsing the main smb.conf and any managed
- * include files. This shows everything Samba is actually serving.
+ * List ALL SMB shares — both managed (from our include file)
+ * and any defined directly in smb.conf.
  */
 export async function listSmbShares(): Promise<SMBShare[]> {
   const shares: SMBShare[] = [];
   const seen = new Set<string>();
 
-  // 1) Parse the main smb.conf for share sections
+  // 1) Parse the main smb.conf for share sections defined inline
   try {
     const conf = await fs.readFile(SMB_CONF, 'utf-8');
     const parsed = parseSmbConfSections(conf);
@@ -68,27 +69,22 @@ export async function listSmbShares(): Promise<SMBShare[]> {
     console.error('[shares] Failed to read smb.conf:', err);
   }
 
-  // 2) Parse managed include files in smb.conf.d/
+  // 2) Parse our managed shares file
   try {
-    await fs.mkdir(SMB_SHARES_DIR, { recursive: true });
-    const files = await fs.readdir(SMB_SHARES_DIR);
-    for (const file of files) {
-      if (!file.endsWith('.conf')) continue;
-      const filePath = path.join(SMB_SHARES_DIR, file);
-      const content = await fs.readFile(filePath, 'utf-8');
-      const parsed = parseSmbConfSections(content);
-      for (const share of parsed) {
-        if (!seen.has(share.name)) {
-          seen.add(share.name);
-          shares.push(share);
-        }
+    const content = await fs.readFile(MANAGED_SHARES_FILE, 'utf-8');
+    const parsed = parseSmbConfSections(content);
+    console.log(`[shares] Parsed ${parsed.length} managed share(s) from ${MANAGED_SHARES_FILE}`);
+    for (const share of parsed) {
+      if (!seen.has(share.name)) {
+        seen.add(share.name);
+        shares.push(share);
       }
     }
   } catch {
-    // Directory may not exist
+    // File may not exist yet — that's fine
   }
 
-  console.log(`[shares] Total SMB shares found: ${shares.length} [${shares.map((s) => s.name).join(', ')}]`);
+  console.log(`[shares] Total SMB shares: ${shares.length} [${shares.map((s) => s.name).join(', ')}]`);
   return shares;
 }
 
@@ -122,10 +118,32 @@ function parseSmbConfSections(content: string): SMBShare[] {
 }
 
 /**
+ * Read all managed shares from our single config file.
+ */
+async function readManagedShares(): Promise<SMBShare[]> {
+  try {
+    const content = await fs.readFile(MANAGED_SHARES_FILE, 'utf-8');
+    return parseSmbConfSections(content);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Write all managed shares back to our single config file.
+ */
+async function writeManagedShares(shares: SMBShare[]): Promise<void> {
+  const header = '# Managed by ZFS Manager — do not edit manually\n\n';
+  const blocks = shares.map((s) => generateSmbShareConfig(s));
+  await fs.writeFile(MANAGED_SHARES_FILE, header + blocks.join('\n'), 'utf-8');
+  console.log(`[shares] Wrote ${shares.length} share(s) to ${MANAGED_SHARES_FILE}`);
+}
+
+/**
  * Create a new SMB share.
  */
 export async function createSmbShare(share: SMBShare): Promise<SMBShare> {
-  // Check if this share name already exists anywhere
+  // Check all sources for name collision
   const allShares = await listSmbShares();
   if (allShares.some((s) => s.name === share.name)) {
     throw new AppError(409, 'SHARE_EXISTS', `SMB share "${share.name}" already exists`);
@@ -140,12 +158,10 @@ export async function createSmbShare(share: SMBShare): Promise<SMBShare> {
     throw new AppError(500, 'PATH_CREATE_FAILED', `Failed to create share path: ${share.path}`);
   }
 
-  const config = generateSmbShareConfig(share);
-  const filePath = path.join(SMB_SHARES_DIR, `${SMB_FILE_PREFIX}${share.name}.conf`);
-
-  await fs.mkdir(SMB_SHARES_DIR, { recursive: true });
-  await fs.writeFile(filePath, config, 'utf-8');
-  console.log(`[shares] Wrote SMB config: ${filePath}`);
+  // Add to our managed shares file
+  const managed = await readManagedShares();
+  managed.push(share);
+  await writeManagedShares(managed);
 
   await ensureSmbInclude();
   await restartSmb();
@@ -157,21 +173,22 @@ export async function createSmbShare(share: SMBShare): Promise<SMBShare> {
  * Update an existing SMB share.
  */
 export async function updateSmbShare(name: string, updates: Partial<SMBShare>): Promise<SMBShare> {
-  const existing = await findSmbShareAnywhere(name);
+  const allShares = await listSmbShares();
+  const existing = allShares.find((s) => s.name === name);
   if (!existing) {
     throw new AppError(404, 'SHARE_NOT_FOUND', `SMB share "${name}" not found`);
   }
 
-  const updated: SMBShare = { ...existing, ...updates, name }; // name cannot change
-  const config = generateSmbShareConfig(updated);
+  const updated: SMBShare = { ...existing, ...updates, name };
 
-  // If it existed in smb.conf, remove it from there and write to managed dir instead
+  // Remove from smb.conf if it was defined there (move to managed file)
   await removeSectionFromSmbConf(name);
 
-  const filePath = path.join(SMB_SHARES_DIR, `${SMB_FILE_PREFIX}${name}.conf`);
-  await fs.mkdir(SMB_SHARES_DIR, { recursive: true });
-  await fs.writeFile(filePath, config, 'utf-8');
-  console.log(`[shares] Updated SMB config: ${filePath}`);
+  // Update in managed shares file
+  let managed = await readManagedShares();
+  managed = managed.filter((s) => s.name !== name);
+  managed.push(updated);
+  await writeManagedShares(managed);
 
   await ensureSmbInclude();
   await restartSmb();
@@ -181,20 +198,17 @@ export async function updateSmbShare(name: string, updates: Partial<SMBShare>): 
 
 /**
  * Delete an SMB share.
- *
- * Removes from managed config files and/or the main smb.conf.
  */
 export async function deleteSmbShare(name: string): Promise<void> {
   let deleted = false;
 
-  // Try removing the managed config file
-  const managedPath = path.join(SMB_SHARES_DIR, `${SMB_FILE_PREFIX}${name}.conf`);
-  try {
-    await fs.unlink(managedPath);
-    console.log(`[shares] Deleted managed config: ${managedPath}`);
+  // Remove from managed shares file
+  const managed = await readManagedShares();
+  const filtered = managed.filter((s) => s.name !== name);
+  if (filtered.length < managed.length) {
+    await writeManagedShares(filtered);
+    console.log(`[shares] Removed "${name}" from managed shares`);
     deleted = true;
-  } catch {
-    // Not a managed share
   }
 
   // Also remove from main smb.conf if present
@@ -207,14 +221,6 @@ export async function deleteSmbShare(name: string): Promise<void> {
   }
 
   await restartSmb();
-}
-
-/**
- * Find a share by name across all sources (smb.conf + managed files).
- */
-async function findSmbShareAnywhere(name: string): Promise<SMBShare | null> {
-  const allShares = await listSmbShares();
-  return allShares.find((s) => s.name === name) ?? null;
 }
 
 /**
@@ -366,7 +372,7 @@ export async function listNfsExports(): Promise<NFSShare[]> {
     for (const file of files) {
       if (!file.startsWith(NFS_FILE_PREFIX) || !file.endsWith('.exports')) continue;
 
-      const filePath = path.join(NFS_EXPORTS_DIR, file);
+      const filePath = NFS_EXPORTS_DIR + '/' + file;
       const content = await fs.readFile(filePath, 'utf-8');
       const nfsShare = parseNfsExport(content);
       if (nfsShare) {
@@ -385,7 +391,7 @@ export async function listNfsExports(): Promise<NFSShare[]> {
  */
 export async function createNfsExport(nfsShare: NFSShare): Promise<NFSShare> {
   const safeName = nfsShare.path.replace(/\//g, '_').replace(/^_/, '');
-  const filePath = path.join(NFS_EXPORTS_DIR, `${NFS_FILE_PREFIX}${safeName}.exports`);
+  const filePath = NFS_EXPORTS_DIR + '/' + `${NFS_FILE_PREFIX}${safeName}.exports`;
 
   const config = generateNfsExport(nfsShare);
 
@@ -407,7 +413,7 @@ export async function updateNfsExport(exportPath: string, updates: Partial<NFSSh
 
   const updated: NFSShare = { ...existing, ...updates, path: exportPath };
   const safeName = exportPath.replace(/\//g, '_').replace(/^_/, '');
-  const filePath = path.join(NFS_EXPORTS_DIR, `${NFS_FILE_PREFIX}${safeName}.exports`);
+  const filePath = NFS_EXPORTS_DIR + '/' + `${NFS_FILE_PREFIX}${safeName}.exports`;
 
   const config = generateNfsExport(updated);
   await fs.writeFile(filePath, config, 'utf-8');
@@ -421,7 +427,7 @@ export async function updateNfsExport(exportPath: string, updates: Partial<NFSSh
  */
 export async function deleteNfsExport(exportPath: string): Promise<void> {
   const safeName = exportPath.replace(/\//g, '_').replace(/^_/, '');
-  const filePath = path.join(NFS_EXPORTS_DIR, `${NFS_FILE_PREFIX}${safeName}.exports`);
+  const filePath = NFS_EXPORTS_DIR + '/' + `${NFS_FILE_PREFIX}${safeName}.exports`;
 
   try {
     await fs.unlink(filePath);
@@ -515,39 +521,62 @@ function parseNfsExport(content: string): NFSShare | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Ensure the main smb.conf includes our share config directory.
- * The include line is placed right after the [global] section so it
- * doesn't accidentally end up inside a share section.
+ * Ensure smb.conf includes our managed shares file.
+ *
+ * Samba's `include` does NOT support globs (*.conf) — it needs an
+ * exact file path. So we use a single file for all managed shares.
+ *
+ * Also cleans up any stray/broken include lines from earlier versions.
  */
 async function ensureSmbInclude(): Promise<void> {
-  const includeGlob = `include = ${SMB_SHARES_DIR}/*.conf`;
+  const includeLine = `include = ${MANAGED_SHARES_FILE}`;
 
   try {
     let conf = await fs.readFile(SMB_CONF, 'utf-8');
 
-    // Already set up?
-    if (conf.includes(SMB_SHARES_DIR)) {
-      console.log('[shares] smb.conf already includes our share directory');
+    // Clean up stray includes from earlier buggy versions
+    const strayPatterns = [
+      /\n?.*include\s*=\s*\/etc\/samba\/smb\.conf\.d\/\*\.conf.*\n?/g,
+      /\n?.*include\s*=\s*\/etc\/samba\/openzfs-shares\.conf.*\n?/g,
+      /\n?# OpenZFS Manager managed shares\n?/g,
+      /\n?# ZFS Manager managed shares\n?/g,
+    ];
+    let cleaned = false;
+    for (const pattern of strayPatterns) {
+      if (pattern.test(conf)) {
+        conf = conf.replace(pattern, '\n');
+        cleaned = true;
+      }
+    }
+
+    // Already has our correct include?
+    if (conf.includes(MANAGED_SHARES_FILE)) {
+      if (cleaned) {
+        // Write the cleaned version
+        conf = conf.replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+        await fs.writeFile(SMB_CONF, conf, 'utf-8');
+        console.log('[shares] Cleaned stray includes from smb.conf');
+      }
+      console.log('[shares] smb.conf already includes our managed shares file');
       return;
     }
 
-    // Find the end of the [global] section (= start of the next [...] section)
-    // and insert the include line right before it.
+    // Insert the include at the end of [global] (before the first non-global section)
     const globalEnd = conf.search(/\n\[(?!global\])/i);
     if (globalEnd !== -1) {
       const before = conf.slice(0, globalEnd);
       const after = conf.slice(globalEnd);
-      conf = before + '\n\n# ZFS Manager managed shares\n' + includeGlob + '\n' + after;
+      conf = before + '\n\n# ZFS Manager managed shares\n' + includeLine + '\n' + after;
     } else {
-      // No other sections — just append
-      conf = conf.trimEnd() + '\n\n# ZFS Manager managed shares\n' + includeGlob + '\n';
+      conf = conf.trimEnd() + '\n\n# ZFS Manager managed shares\n' + includeLine + '\n';
     }
 
+    conf = conf.replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
     await fs.writeFile(SMB_CONF, conf, 'utf-8');
-    console.log(`[shares] Added include directive to smb.conf (inside [global]): ${includeGlob}`);
+    console.log(`[shares] Added include to smb.conf: ${includeLine}`);
   } catch (err) {
-    console.error('[shares] Failed to update smb.conf with include directive:', err);
-    throw new AppError(500, 'SMB_CONFIG_ERROR', 'Failed to update Samba configuration to include managed shares');
+    console.error('[shares] Failed to update smb.conf:', err);
+    throw new AppError(500, 'SMB_CONFIG_ERROR', 'Failed to update Samba configuration');
   }
 }
 
@@ -563,7 +592,7 @@ async function restartSmb(): Promise<void> {
   } catch (err) {
     const error = err as Error & { stderr?: string };
     console.error('[shares] testparm validation FAILED:', error.stderr ?? error.message);
-    // Don't throw — testparm exits non-zero for warnings too, and we still want to try restarting
+    // Don't throw — testparm exits non-zero for warnings too
   }
 
   // Restart smbd (Debian/Ubuntu use smbd, RHEL/CentOS use smb)
