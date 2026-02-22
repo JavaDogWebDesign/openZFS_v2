@@ -220,7 +220,7 @@ export const userApi = {
     password?: string;
     locked?: boolean;
   }) {
-    return apiClient.patch<SystemUser>(`/users/${encodeURIComponent(username)}`, data);
+    return apiClient.put<SystemUser>(`/users/${encodeURIComponent(username)}`, data);
   },
 
   destroy(username: string, options?: { removeHome?: boolean }) {
@@ -249,7 +249,7 @@ export const groupApi = {
   },
 
   update(name: string, data: { members?: string[] }) {
-    return apiClient.patch<SystemGroup>(`/groups/${encodeURIComponent(name)}`, data);
+    return apiClient.put<SystemGroup>(`/groups/${encodeURIComponent(name)}`, data);
   },
 
   destroy(name: string) {

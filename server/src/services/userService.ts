@@ -189,19 +189,11 @@ export async function modifyUser(username: string, params: ModifyUserParams): Pr
 
 /**
  * Change a user's system password via chpasswd.
+ *
+ * chpasswd reads "username:password" lines from stdin, so we use spawn
+ * to pipe the data in.
  */
 export async function changePassword(username: string, newPassword: string): Promise<void> {
-  try {
-    const child = await execFile('chpasswd', [], {
-      // chpasswd reads "username:password" from stdin
-    });
-    // Since execFile doesn't pipe stdin easily, use a subprocess approach
-    void child; // appease linter
-  } catch {
-    // Fall through to spawn-based approach
-  }
-
-  // Use spawn for stdin piping
   const { spawn } = await import('node:child_process');
 
   return new Promise<void>((resolve, reject) => {

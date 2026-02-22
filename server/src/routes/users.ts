@@ -31,6 +31,7 @@ const CreateUserSchema = z.object({
   homeDir: z.string().optional(),
   groups: z.array(z.string()).optional(),
   password: z.string().min(1, 'Password is required'),
+  createHome: z.boolean().optional().default(true),
 });
 
 const ModifyUserSchema = z.object({
@@ -39,6 +40,7 @@ const ModifyUserSchema = z.object({
   homeDir: z.string().optional(),
   groups: z.array(z.string()).optional(),
   locked: z.boolean().optional(),
+  password: z.string().min(1).optional(),
 });
 
 const SetSmbPasswordSchema = z.object({
@@ -73,7 +75,7 @@ router.post(
   }),
   async (req, res, next) => {
     try {
-      const { username, fullName, shell, homeDir, groups, password } = req.body as z.infer<typeof CreateUserSchema>;
+      const { username, fullName, shell, homeDir, groups, password, createHome } = req.body as z.infer<typeof CreateUserSchema>;
 
       const user = await userService.createUser({
         username,
@@ -81,7 +83,7 @@ router.post(
         shell,
         homeDir,
         groups,
-        createHome: true,
+        createHome,
       });
 
       // Set password
@@ -133,8 +135,13 @@ router.put(
   }),
   async (req, res, next) => {
     try {
-      const params = req.body as z.infer<typeof ModifyUserSchema>;
+      const { password, ...params } = req.body as z.infer<typeof ModifyUserSchema>;
       const user = await userService.modifyUser(req.params.username, params);
+
+      // Handle password change if requested
+      if (password) {
+        await userService.changePassword(req.params.username, password);
+      }
 
       const response: ApiResponse<SystemUser> = {
         success: true,
