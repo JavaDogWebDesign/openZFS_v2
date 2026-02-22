@@ -158,6 +158,26 @@ export async function createSmbShare(share: SMBShare): Promise<SMBShare> {
     throw new AppError(500, 'PATH_CREATE_FAILED', `Failed to create share path: ${share.path}`);
   }
 
+  // Set filesystem permissions so valid users can actually write.
+  // chmod 2775 = setgid + rwxrwxr-x (group-writable, new files inherit group)
+  try {
+    await execFile('chmod', ['2775', share.path]);
+    console.log(`[shares] Set permissions 2775 on ${share.path}`);
+
+    // If there are valid users, chown to the first valid user so they have access.
+    // If forceUser/forceGroup is set, use those instead.
+    const owner = share.forceUser || share.validUsers?.[0];
+    const group = share.forceGroup || (share.validUsers?.[0] ? share.validUsers[0] : undefined);
+    if (owner) {
+      const chownTarget = group ? `${owner}:${group}` : owner;
+      await execFile('chown', [chownTarget, share.path]);
+      console.log(`[shares] Set ownership ${chownTarget} on ${share.path}`);
+    }
+  } catch (err) {
+    console.error(`[shares] Failed to set permissions on ${share.path}:`, err);
+    // Non-fatal — share will still be created, just may have permission issues
+  }
+
   // Add to our managed shares file
   const managed = await readManagedShares();
   managed.push(share);
