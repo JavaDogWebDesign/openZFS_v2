@@ -17,7 +17,11 @@ export function UserCreate({ open, onClose, onCreated, availableGroups = [] }: U
   const [shell, setShell] = useState('/bin/bash');
   const [selectedGroups, setSelectedGroups] = useState<string[]>([]);
   const [createHome, setCreateHome] = useState(true);
+  const [enableSmb, setEnableSmb] = useState(true);
+  const [smbPassword, setSmbPassword] = useState('');
+  const [useSamePassword, setUseSamePassword] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   if (!open) return null;
 
@@ -33,6 +37,7 @@ export function UserCreate({ open, onClose, onCreated, availableGroups = [] }: U
     e.preventDefault();
     if (!passwordsMatch) return;
     setIsSubmitting(true);
+    setError(null);
 
     try {
       const result = await userApi.create({
@@ -43,12 +48,25 @@ export function UserCreate({ open, onClose, onCreated, availableGroups = [] }: U
         groups: selectedGroups.length > 0 ? selectedGroups : undefined,
         createHome,
       });
+
       if (result.success) {
+        // Set SMB password after user is created
+        if (enableSmb) {
+          const smbPwd = useSamePassword ? password : smbPassword;
+          if (smbPwd) {
+            const smbResult = await userApi.setSmbPassword(username, smbPwd);
+            if (!smbResult.success) {
+              console.error('[users] Failed to set SMB password:', smbResult.error);
+            }
+          }
+        }
         onCreated();
         onClose();
+      } else {
+        setError(result.error?.message ?? 'Failed to create user');
       }
     } catch {
-      // Error handled by API client
+      setError('Network error while creating user');
     } finally {
       setIsSubmitting(false);
     }
@@ -70,6 +88,12 @@ export function UserCreate({ open, onClose, onCreated, availableGroups = [] }: U
         </div>
 
         <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6 space-y-4">
+          {error && (
+            <div className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              {error}
+            </div>
+          )}
+
           {/* Username */}
           <div>
             <label className="block text-sm font-medium text-foreground mb-1">Username</label>
@@ -128,6 +152,53 @@ export function UserCreate({ open, onClose, onCreated, availableGroups = [] }: U
             />
             {confirmPassword && !passwordsMatch && (
               <p className="mt-1 text-xs text-destructive">Passwords do not match</p>
+            )}
+          </div>
+
+          {/* Enable SMB */}
+          <div className="rounded-lg border border-border p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="text-sm font-medium text-foreground">Enable SMB / File Sharing</label>
+                <p className="text-xs text-muted-foreground">Allow this user to connect to Samba shares</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEnableSmb(!enableSmb)}
+                className={`relative h-6 w-11 rounded-full transition-colors ${enableSmb ? 'bg-primary' : 'bg-muted'}`}
+              >
+                <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${enableSmb ? 'translate-x-5' : 'translate-x-0'}`} />
+              </button>
+            </div>
+
+            {enableSmb && (
+              <div className="space-y-3 pt-1">
+                <div className="flex items-center space-x-3">
+                  <input
+                    type="checkbox"
+                    id="useSamePassword"
+                    checked={useSamePassword}
+                    onChange={(e) => setUseSamePassword(e.target.checked)}
+                    className="h-4 w-4 rounded border-input"
+                  />
+                  <label htmlFor="useSamePassword" className="text-sm text-foreground">
+                    Use same password as system account
+                  </label>
+                </div>
+
+                {!useSamePassword && (
+                  <div>
+                    <label className="block text-sm font-medium text-foreground mb-1">SMB Password</label>
+                    <input
+                      type="password"
+                      value={smbPassword}
+                      onChange={(e) => setSmbPassword(e.target.value)}
+                      placeholder="SMB password"
+                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring"
+                    />
+                  </div>
+                )}
+              </div>
             )}
           </div>
 

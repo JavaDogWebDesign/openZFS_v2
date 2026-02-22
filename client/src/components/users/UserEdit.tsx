@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { X, Save } from 'lucide-react';
 import type { SystemUser } from '@zfs-manager/shared';
 import { userApi } from '@/api/endpoints';
@@ -12,14 +12,28 @@ interface UserEditProps {
 }
 
 export function UserEdit({ open, user, onClose, onSaved, availableGroups = [] }: UserEditProps) {
-  const [fullName, setFullName] = useState(user?.fullName ?? '');
-  const [shell, setShell] = useState(user?.shell ?? '/bin/bash');
-  const [selectedGroups, setSelectedGroups] = useState<string[]>(user?.groups ?? []);
+  const [fullName, setFullName] = useState('');
+  const [shell, setShell] = useState('/bin/bash');
+  const [selectedGroups, setSelectedGroups] = useState<string[]>([]);
   const [changePassword, setChangePassword] = useState(false);
   const [newPassword, setNewPassword] = useState('');
   const [changeSmbPassword, setChangeSmbPassword] = useState(false);
   const [smbPassword, setSmbPassword] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Reset form state when user or open state changes
+  useEffect(() => {
+    if (!open || !user) return;
+    setFullName(user.fullName ?? '');
+    setShell(user.shell ?? '/bin/bash');
+    setSelectedGroups(user.groups ?? []);
+    setChangePassword(false);
+    setNewPassword('');
+    setChangeSmbPassword(false);
+    setSmbPassword('');
+    setError(null);
+  }, [open, user]);
 
   if (!open || !user) return null;
 
@@ -32,6 +46,7 @@ export function UserEdit({ open, user, onClose, onSaved, availableGroups = [] }:
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
+    setError(null);
 
     try {
       const updateResult = await userApi.update(user.username, {
@@ -42,15 +57,22 @@ export function UserEdit({ open, user, onClose, onSaved, availableGroups = [] }:
       });
 
       if (updateResult.success && changeSmbPassword && smbPassword) {
-        await userApi.setSmbPassword(user.username, smbPassword);
+        const smbResult = await userApi.setSmbPassword(user.username, smbPassword);
+        if (!smbResult.success) {
+          setError(`User updated but SMB password failed: ${smbResult.error?.message}`);
+          setIsSubmitting(false);
+          return;
+        }
       }
 
       if (updateResult.success) {
         onSaved();
         onClose();
+      } else {
+        setError(updateResult.error?.message ?? 'Failed to update user');
       }
     } catch {
-      // Error handled by API client
+      setError('Network error while updating user');
     } finally {
       setIsSubmitting(false);
     }
@@ -71,6 +93,12 @@ export function UserEdit({ open, user, onClose, onSaved, availableGroups = [] }:
         </div>
 
         <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6 space-y-4">
+          {error && (
+            <div className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              {error}
+            </div>
+          )}
+
           {/* Username (read-only) */}
           <div>
             <label className="block text-sm font-medium text-foreground mb-1">Username</label>
@@ -156,7 +184,7 @@ export function UserEdit({ open, user, onClose, onSaved, availableGroups = [] }:
             )}
           </div>
 
-          {/* Change SMB Password */}
+          {/* SMB Password */}
           <div className="rounded-lg border border-border p-4 space-y-3">
             <div className="flex items-center space-x-3">
               <input
@@ -166,9 +194,16 @@ export function UserEdit({ open, user, onClose, onSaved, availableGroups = [] }:
                 onChange={(e) => setChangeSmbPassword(e.target.checked)}
                 className="h-4 w-4 rounded border-input"
               />
-              <label htmlFor="changeSmbPassword" className="text-sm font-medium text-foreground">
-                Set SMB password
-              </label>
+              <div>
+                <label htmlFor="changeSmbPassword" className="text-sm font-medium text-foreground">
+                  {user.smbEnabled ? 'Change SMB password' : 'Enable SMB / File Sharing'}
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  {user.smbEnabled
+                    ? 'Update the Samba password for this user'
+                    : 'Set an SMB password to allow this user to connect to file shares'}
+                </p>
+              </div>
             </div>
             {changeSmbPassword && (
               <input
